@@ -10,7 +10,7 @@ Group Members & Email Addresses:
 Versioning
 ==========
 
-Github Link: 
+Github Link: https://github.com/BrookeJackI/CS371-Atari-Pong-Project
 
 General Info
 ============
