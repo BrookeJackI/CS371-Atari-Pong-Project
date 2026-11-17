@@ -4,8 +4,8 @@ Contact Info
 
 Group Members & Email Addresses:
 
-    Person 1, person1@uky.edu
-    Person 2, person2@uky.edu
+    Brooke Jackson, bija222@uky.edu
+    Myra Jones, majo286@uky.edu
 
 Versioning
 ==========
