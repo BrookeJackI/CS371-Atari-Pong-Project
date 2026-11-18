@@ -198,3 +198,260 @@ class Game:
                                              paddleX, player.y, PADDLE_W, PADDLE_H):
                 self.vx *= -1
                 self.vy = ((self.by + BALL_SIZE // 2) - (player.y + PADDLE_H // 2)) // 2
+
+        # Top and bottom walls
+        if self.vy < 0 and self.by < WALL_THICKNESS:
+            self.vy *= -1
+        elif self.vy > 0 and self.by + BALL_SIZE > SCREEN_H - WALL_THICKNESS:
+            self.vy *= -1
+
+        if self.leftScore >= WIN_SCORE or self.rightScore >= WIN_SCORE:
+            self.over = True
+            self.winner = "left" if self.leftScore >= WIN_SCORE else "right"
+            winnerPlayer = self.left if self.winner == "left" else self.right
+            leaderboard.recordWin(winnerPlayer.initials)
+
+    def snapshot(self) -> dict:
+        # Author: Myra Jones
+        # Purpose: Build the state message sent to both clients
+        # Pre: Caller holds self.lock
+        # Post: Returns a dict ready to be JSON-encoded; nothing is modified
+        return {"t": "state", "sync": self.sync, "bx": self.bx, "by": self.by,
+                "vx": self.vx, "vy": self.vy, "lp": self.left.y, "rp": self.right.y,
+                "ls": self.leftScore, "rs": self.rightScore,
+                "over": self.over, "winner": self.winner}
+
+    def handleMessage(self, player: Player, message: dict) -> None:
+        # Author: Myra Jones
+        # Purpose: Apply one message received from a client
+        # Pre: message is a decoded JSON object from player
+        # Post: Paddle position updated, or player's rematch vote recorded (and the match reset
+        #       if both players voted)
+        kind = message.get("t")
+        with self.lock:
+            if kind == "paddle":
+                try:
+                    player.y = clampPaddleY(int(message.get("y", player.y)))
+                except (TypeError, ValueError):
+                    pass
+            elif kind == "again" and self.over:
+                player.wantsAgain = True
+                if self.left.wantsAgain and self.right.wantsAgain:
+                    self.leftScore = self.rightScore = 0
+                    self.over = False
+                    self.winner = ""
+                    self.left.wantsAgain = self.right.wantsAgain = False
+                    self.resetBall("left")
+
+    def playerLeft(self, player: Player) -> None:
+        # Author: Myra Jones
+        # Purpose: Handle a disconnect: tell the other player and stop the game loop
+        # Pre: player belongs to this game
+        # Post: self.running is False; the opponent has been notified (if still connected)
+        with self.lock:
+            if not self.running:
+                return
+            self.running = False
+        other = self.right if player is self.left else self.left
+        other.send({"t": "opponent_left"})
+
+    def run(self) -> None:
+        # Author: Myra Jones
+        # Purpose: Game loop; simulate and broadcast state TICKS_PER_SECOND times per second
+        # Pre: Both players are connected and have been sent the "start" message
+        # Post: Returns after the game is stopped; closes both sockets
+        tickLength = 1.0 / TICKS_PER_SECOND
+        nextTick = time.monotonic()
+        while True:
+            with self.lock:
+                if not self.running:
+                    break
+                if not self.over:
+                    self.step()
+                self.sync += 1
+                state = self.snapshot()
+            if not (self.left.send(state) and self.right.send(state)):
+                self.playerLeft(self.left)
+                break
+            nextTick += tickLength
+            delay = nextTick - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                nextTick = time.monotonic()      # fell behind; don't try to catch up in a burst
+        for p in (self.left, self.right):
+            try:
+                p.conn.close()
+            except OSError:
+                pass
+
+
+class Lobby:
+    # Author: Myra Jones
+    # Purpose: Pairs waiting players into games, so any number of clients can connect at once
+    # Pre: None
+    # Post: Each pair of consecutive joiners is placed in its own Game with its own thread
+
+    def __init__(self) -> None:
+        # Author: Myra Jones
+        # Purpose: Create an empty lobby
+        # Pre: None
+        # Post: No player is waiting
+        self.lock: threading.Lock = threading.Lock()
+        self.waiting: Optional[Player] = None
+
+    def join(self, player: Player) -> None:
+        # Author: Myra Jones
+        # Purpose: Add a player; if someone is already waiting, start a game with them
+        # Pre: player is not already in a game or waiting
+        # Post: Either player is the waiting player, or a Game thread has been started for the pair
+        with self.lock:
+            if self.waiting is None:
+                self.waiting = player
+                return
+            first, self.waiting = self.waiting, None
+        game = Game(first, player)
+        for p in (first, player):
+            p.send({"t": "start", "w": SCREEN_W, "h": SCREEN_H, "pw": PADDLE_W, "ph": PADDLE_H,
+                    "side": p.side})
+        threading.Thread(target=game.run, daemon=True).start()
+
+    def leave(self, player: Player) -> None:
+        # Author: Myra Jones
+        # Purpose: Remove a player who disconnected while still waiting for an opponent
+        # Pre: None
+        # Post: If player was the waiting player, the lobby is empty again
+        with self.lock:
+            if self.waiting is player:
+                self.waiting = None
+
+
+lobby: Lobby = Lobby()
+
+
+def sanitizeInitials(raw: object) -> str:
+    # Author: Myra Jones
+    # Purpose: Reduce client-supplied initials to up to 3 uppercase letters/digits
+    # Pre: raw is any value
+    # Post: Returns a 1-3 character string ("???" if nothing valid was supplied)
+    text = "".join(c for c in str(raw).upper() if c.isalnum())[:3]
+    return text or "???"
+
+
+def handleClient(conn: socket.socket, addr: Tuple[str, int]) -> None:
+    # Author: Myra Jones
+    # Purpose: Thread body for one client: read the join message, then relay messages to its game
+    # Pre: conn is a freshly accepted socket
+    # Post: Client is removed from the lobby/game and its socket is closed when it disconnects
+    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    reader = conn.makefile("rb")
+    player: Optional[Player] = None
+    try:
+        line = reader.readline(4096)
+        first = json.loads(line) if line else {}
+        if first.get("t") != "join":
+            return
+        player = Player(conn, sanitizeInitials(first.get("initials", "")))
+        print(f"[+] {player.initials} connected from {addr[0]}:{addr[1]}")
+        lobby.join(player)
+        while True:
+            line = reader.readline(4096)
+            if not line:
+                break
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if player.game is not None and isinstance(message, dict):
+                player.game.handleMessage(player, message)
+    except (OSError, ValueError):
+        pass
+    finally:
+        if player is not None:
+            print(f"[-] {player.initials} disconnected")
+            lobby.leave(player)
+            if player.game is not None:
+                player.game.playerLeft(player)
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+class LeaderboardHandler(BaseHTTPRequestHandler):
+    # Author: Myra Jones
+    # Purpose: Serve the win leaderboard as a simple HTML page
+    # Pre: Server created with this handler
+    # Post: Responds to GET requests with the current leaderboard
+
+    def do_GET(self) -> None:
+        # Author: Myra Jones
+        # Purpose: Respond to any GET with the leaderboard page
+        # Pre: A GET request has been received
+        # Post: HTML page written to the client
+        rows = "".join(f"<tr><td>{rank}</td><td>{html.escape(name)}</td><td>{wins}</td></tr>"
+                       for rank, (name, wins) in enumerate(leaderboard.ranked(), start=1))
+        if not rows:
+            rows = '<tr><td colspan="3">No games finished yet</td></tr>'
+        page = ("<!DOCTYPE html><html><head><meta charset='utf-8'><title>Pong Leaderboard</title>"
+                "<meta http-equiv='refresh' content='5'>"
+                "<style>body{font-family:sans-serif;background:#111;color:#eee;text-align:center}"
+                "table{margin:2em auto;border-collapse:collapse}"
+                "td,th{padding:.4em 1.5em;border-bottom:1px solid #444}</style></head><body>"
+                "<h1>Pong Leaderboard</h1><table><tr><th>#</th><th>Player</th><th>Wins</th></tr>"
+                f"{rows}</table></body></html>").encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(page)))
+        self.end_headers()
+        self.wfile.write(page)
+
+    def log_message(self, format: str, *args: object) -> None:
+        # Author: Myra Jones
+        # Purpose: Silence per-request logging so the server console stays readable
+        # Pre: None
+        # Post: Nothing is printed
+        return
+
+
+def startLeaderboardServer() -> None:
+    # Author: Myra Jones
+    # Purpose: Start the leaderboard web server on port 80 (falls back to 8080 if 80 is not allowed)
+    # Pre: None
+    # Post: A daemon thread is serving HTTP, or a message explains why it could not be started
+    for port in (80, 8080):
+        try:
+            httpd = HTTPServer(("0.0.0.0", port), LeaderboardHandler)
+        except OSError as e:
+            print(f"Leaderboard: could not bind port {port} ({e})")
+            continue
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        print(f"Leaderboard page available on port {port}")
+        return
+    print("Leaderboard page disabled")
+
+
+def main() -> None:
+    # Author: Myra Jones
+    # Purpose: Run the server: listen for clients forever, one thread per client
+    # Pre: Optional command-line argument is the TCP port to listen on (default 5000)
+    # Post: Does not return until interrupted (Ctrl+C)
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("0.0.0.0", port))
+    server.listen()
+    print(f"Pong server listening on port {port}")
+    startLeaderboardServer()
+    try:
+        while True:
+            conn, addr = server.accept()
+            threading.Thread(target=handleClient, args=(conn, addr), daemon=True).start()
+    except KeyboardInterrupt:
+        print("\nShutting down")
+    finally:
+        server.close()
+
+
+if __name__ == "__main__":
+    main()
