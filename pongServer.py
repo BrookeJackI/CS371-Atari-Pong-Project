@@ -1,6 +1,6 @@
 # =================================================================================================
 # Contributing Authors:	    Brooke Jackson, Myra Jones
-# Email Addresses:          person1@uky.edu, majo286@uky.edu
+# Email Addresses:          bija222@uky.edu, majo286@uky.edu
 # Date:                     2026-11-18
 # Purpose:                  Pong game server. Accepts any number of clients over TCP, pairs them
 #                           into two-player games (one thread per client, one game-loop thread per
