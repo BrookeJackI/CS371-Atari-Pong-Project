@@ -1,9 +1,17 @@
 # =================================================================================================
-# Contributing Authors:	    <Anyone who touched the code>
-# Email Addresses:          <Your uky.edu email addresses>
-# Date:                     <The date the file was last edited>
-# Purpose:                  <How this file contributes to the project>
-# Misc:                     <Not Required.  Anything else you might want to include>
+# Contributing Authors:	    Brooke Jackson, Myra Jones
+# Email Addresses:          bija222@uky.edu, majo286@uky.edu
+# Date:                     2026-11-18
+# Purpose:                  Pong game server. Accepts any number of clients over TCP, pairs them
+#                           into two-player games (one thread per client, one game-loop thread per
+#                           game), simulates the ball and score authoritatively, relays state to
+#                           both players, supports "play again", and serves a win leaderboard
+#                           as a webpage over HTTP.
+# Misc:                     Protocol is newline-delimited JSON over TCP.
+#                       server -> client: {"t":"start","w":640,"h":480,"pw":10,"ph":50,"side":"left"}
+#                     {"t":"state","sync":N,"bx":..,"by":..,"vx":..,"vy":..,"lp":..,"rp":..,
+#                      "ls":..,"rs":..,"over":bool,"winner":"left"|"right"|""}
+#                     {"t":"opponent_left"}
 # =================================================================================================
 
 import pygame
