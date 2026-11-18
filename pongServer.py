@@ -102,3 +102,82 @@ class Leaderboard:
 
 leaderboard: Leaderboard = Leaderboard(LEADERBOARD_FILE)
 
+
+class Player:
+    # Author: Myra Jones
+    # Purpose: One connected client: its socket, identity, paddle position and game membership
+    # Pre: conn is a connected TCP socket
+    # Post: send() is safe to call from multiple threads
+
+    def __init__(self, conn: socket.socket, initials: str) -> None:
+        # Author: Myra Jones
+        # Purpose: Create a player record
+        # Pre: conn is connected; initials is sanitized
+        # Post: Player is not yet in a game (game is None, side is "")
+        self.conn: socket.socket = conn
+        self.initials: str = initials
+        self.side: str = ""
+        self.y: int = clampPaddleY(SCREEN_H // 2 - PADDLE_H // 2)
+        self.wantsAgain: bool = False
+        self.game: Optional["Game"] = None
+        self.sendLock: threading.Lock = threading.Lock()
+
+    def send(self, message: dict) -> bool:
+        # Author: Myra Jones
+        # Purpose: Send one JSON message terminated by a newline
+        # Pre: message is JSON-serializable
+        # Post: Returns True if sent; False if the connection is broken
+        data = (json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8")
+        try:
+            with self.sendLock:
+                self.conn.sendall(data)
+            return True
+        except OSError:
+            return False
+
+
+class Game:
+    # Author: Brooke Jackson, Myra Jones 
+    # Purpose: Owns the state of one match between two players and simulates it at a fixed tick rate
+    # Pre: Constructed with exactly two Players (left first, right second)
+    # Post: run() returns once the game has been stopped (a player left)
+
+    def __init__(self, left: Player, right: Player) -> None:
+        # Author: Myra Jones
+        # Purpose: Set up a fresh match
+        # Pre: left and right are distinct, connected Players
+        # Post: Players are assigned sides and linked to this game; scores are 0; ball is centered
+        self.left: Player = left
+        self.right: Player = right
+        left.side, right.side = "left", "right"
+        left.game = self
+        right.game = self
+        self.lock: threading.Lock = threading.Lock()
+        self.running: bool = True
+        self.sync: int = 0
+        self.leftScore: int = 0
+        self.rightScore: int = 0
+        self.over: bool = False
+        self.winner: str = ""
+        self.bx: int = SCREEN_W // 2
+        self.by: int = SCREEN_H // 2
+        self.vx: int = -BALL_SPEED
+        self.vy: int = 0
+
+    def resetBall(self, nowGoing: str) -> None:
+        # Author: Myra Jones
+        # Purpose: Put the ball back at center heading toward the given side
+        # Pre: nowGoing is "left" or "right"; caller holds self.lock
+        # Post: Ball is centered with horizontal velocity toward nowGoing and no vertical velocity
+        self.bx, self.by = SCREEN_W // 2, SCREEN_H // 2
+        self.vx = -BALL_SPEED if nowGoing == "left" else BALL_SPEED
+        self.vy = 0
+
+    def step(self) -> None:
+        # Author: Brooke Jackson, Myra Jones
+        # Purpose: Advance the simulation one tick: move ball, score, paddle and wall bounces
+        # Pre: Caller holds self.lock and the game is not over
+        # Post: Ball position/velocity and scores are updated; may set over/winner and record a win
+        self.bx += self.vx
+        self.by += self.vy
+
